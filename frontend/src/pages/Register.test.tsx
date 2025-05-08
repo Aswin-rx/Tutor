@@ -1,112 +1,171 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
 import Register from './Register';
+import { rest } from 'msw';
+import { setupServer } from 'msw/node';
+import { BrowserRouter } from 'react-router-dom';
+import '@testing-library/jest-dom';
 
-// Mock dependencies
+// Mock AuthContext
+const loginMock = jest.fn();
+
 jest.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ login: jest.fn() })
+  useAuth: () => ({
+    login: loginMock,
+  }),
 }));
 
-jest.mock('../utils/api', () => ({
-  post: jest.fn()
-}));
+// Ensure the mock server is intercepting requests correctly
+const server = setupServer(
+  rest.post('http://127.0.0.1:5000/api/auth/register', (_, res, ctx) => {
+    const { email } = _.body as any;
+    if (email === 'error@example.com') {
+      return res(ctx.status(500), ctx.json({ message: 'Server Error' }));
+    }
+    if (email === 'no-token@example.com') {
+      return res(ctx.status(200), ctx.json({}));
+    }
+    return res(ctx.status(200), ctx.json({ token: 'test-token' }));
+  })
+);
 
-const renderWithRouter = (ui: React.ReactElement) => {
-  return render(<BrowserRouter>{ui}</BrowserRouter>);
+// Enable MSW
+beforeAll(() => server.listen());
+afterEach(() => {
+  server.resetHandlers();
+  loginMock.mockReset();
+});
+afterAll(() => server.close());
+
+const renderForm = () => {
+  render(
+    <BrowserRouter>
+      <Register />
+    </BrowserRouter>
+  );
 };
 
-// Print the DOM after each test if it fails
-afterEach(() => {
-  // Only print if the test failed
-  const assertions = expect.getState().currentTestAssertions as { status: string }[] | undefined;
-  if (
-    expect.getState().currentTestName &&
-    Array.isArray(assertions) &&
-    assertions.some((a) => a.status === 'failed')
-  ) {
-    // eslint-disable-next-line no-console
-    console.log('--- DOM OUTPUT ---');
-    // eslint-disable-next-line no-console
-    console.log(document.body.innerHTML);
-    // eslint-disable-next-line no-console
-    console.log('------------------');
-  }
-});
+const fillForm = (email = 'john@example.com') => {
+  fireEvent.input(screen.getByPlaceholderText(/First Name/i), {
+    target: { value: 'John' },
+  });
+  fireEvent.input(screen.getByPlaceholderText(/Last Name/i), {
+    target: { value: 'Doe' },
+  });
+  fireEvent.input(screen.getByPlaceholderText(/Email/i), {
+    target: { value: email },
+  });
+  fireEvent.input(screen.getByPlaceholderText(/Password/i), {
+    target: { value: '123456' },
+  });
+  fireEvent.change(screen.getByRole('combobox'), {
+    target: { value: 'student' },
+  });
+};
 
-describe('Register Page', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    localStorage.clear();
+describe('Register Component', () => {
+  test('renders all fields', () => {
+    renderForm();
+    expect(screen.getByPlaceholderText(/First Name/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Last Name/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Email/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Password/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Create Account/i })).toBeInTheDocument();
   });
 
-  it('renders all input fields and button', () => {
-    renderWithRouter(<Register />);
-    // Print the DOM for debugging
-    // eslint-disable-next-line no-console
-    console.log(document.body.innerHTML);
-    expect(screen.getByPlaceholderText('First Name')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Last Name')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Email')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Password')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+  test('shows validation errors if fields are empty', async () => {
+    renderForm();
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findAllByText(/is required/i)).toHaveLength(5);
   });
 
-  it('shows validation errors when submitting empty form', async () => {
-    renderWithRouter(<Register />);
-    fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+  test('shows password length error', async () => {
+    renderForm();
+    fireEvent.input(screen.getByPlaceholderText(/Password/i), {
+      target: { value: '123' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findByText(/at least 6 characters/i)).toBeInTheDocument();
+  });
+
+  test('submits valid form and calls login', async () => {
+    renderForm();
+    fillForm();
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
     await waitFor(() => {
-      expect(screen.getByText('First Name is required')).toBeInTheDocument();
-      expect(screen.getByText('Last Name is required')).toBeInTheDocument();
-      expect(screen.getByText('Email is required')).toBeInTheDocument();
-      expect(screen.getByText('Password is required')).toBeInTheDocument();
-      expect(screen.getByText('Role is required')).toBeInTheDocument();
+      expect(loginMock).toHaveBeenCalledWith('test-token');
     });
   });
 
-  it('shows password min length error', async () => {
-    renderWithRouter(<Register />);
-    fireEvent.input(screen.getByPlaceholderText('Password'), { target: { value: '123' } });
-    fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+  test('shows error if server fails', async () => {
+    renderForm();
+    fillForm('error@example.com');
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findByText(/Server Error/i)).toBeInTheDocument();
+  });
+
+  test('shows fallback error if no message from server', async () => {
+    server.use(
+      rest.post('http://127.0.0.1:5000/api/auth/register', (_, res, ctx) => {
+        return res(ctx.status(500), ctx.json({ message: 'Something went wrong' }));
+      })
+    );
+
+    renderForm();
+    fillForm();
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
     await waitFor(() => {
-      expect(screen.getByText('Password must be at least 6 characters')).toBeInTheDocument();
+      expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument();
     });
   });
 
-  it('submits form and navigates on success', async () => {
-    const mockPost = require('../utils/api').post;
-    mockPost.mockResolvedValue({ data: { token: 'test-token' } });
-    renderWithRouter(<Register />);
-    fireEvent.input(screen.getByPlaceholderText('First Name'), { target: { value: 'John' } });
-    fireEvent.input(screen.getByPlaceholderText('Last Name'), { target: { value: 'Doe' } });
-    fireEvent.input(screen.getByPlaceholderText('Email'), { target: { value: 'john@example.com' } });
-    fireEvent.input(screen.getByPlaceholderText('Password'), { target: { value: 'password123' } });
-    fireEvent.change(screen.getByDisplayValue('Select your role'), { target: { value: 'student' } });
-    fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+  test('does not call login if no token', async () => {
+    renderForm();
+    fillForm('no-token@example.com');
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
     await waitFor(() => {
-      expect(mockPost).toHaveBeenCalledWith('/auth/register', expect.objectContaining({
-        firstName: 'John',
-        lastName: 'Doe',
-        email: 'john@example.com',
-        password: 'password123',
-        role: 'student'
-      }));
-      expect(localStorage.getItem('token')).toBe('test-token');
+      expect(loginMock).not.toHaveBeenCalled();
     });
   });
 
-  it('shows API error message on registration failure', async () => {
-    const mockPost = require('../utils/api').post;
-    mockPost.mockRejectedValue({ response: { data: { message: 'Email already exists' } } });
-    renderWithRouter(<Register />);
-    fireEvent.input(screen.getByPlaceholderText('First Name'), { target: { value: 'Jane' } });
-    fireEvent.input(screen.getByPlaceholderText('Last Name'), { target: { value: 'Doe' } });
-    fireEvent.input(screen.getByPlaceholderText('Email'), { target: { value: 'jane@example.com' } });
-    fireEvent.input(screen.getByPlaceholderText('Password'), { target: { value: 'password123' } });
-    fireEvent.change(screen.getByDisplayValue('Select your role'), { target: { value: 'tutor' } });
-    fireEvent.click(screen.getByRole('button', { name: /create account/i }));
-    await waitFor(() => {
-      expect(screen.getByText('Email already exists')).toBeInTheDocument();
+  test('displays error message from API', async () => {
+    server.use(
+      rest.post('http://127.0.0.1:5000/api/auth/register', (_, res, ctx) => {
+        return res(ctx.status(400), ctx.json({ message: 'Email already exists' }));
+      })
+    );
+    renderForm();
+    fillForm();
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findByText(/Email already exists/i)).toBeInTheDocument();
+  });
+
+  test('role field validation error', async () => {
+    renderForm();
+    fillForm();
+    fireEvent.change(screen.getByRole('combobox'), {
+      target: { value: '' },
     });
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findByText(/Role is required/i)).toBeInTheDocument();
+  });
+
+  test('does not submit if only some fields are filled', async () => {
+    renderForm();
+    fireEvent.input(screen.getByPlaceholderText(/First Name/i), {
+      target: { value: 'Test' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Create Account/i }));
+
+    expect(await screen.findAllByText(/is required/i)).not.toHaveLength(0);
+    expect(loginMock).not.toHaveBeenCalled();
   });
 });

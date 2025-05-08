@@ -14,7 +14,11 @@ interface RegisterForm {
   role: 'student' | 'tutor';
 }
 
-export default function Register() {
+interface RegisterProps {
+  onSubmitOverride?: (data: RegisterForm) => Promise<any>;
+}
+
+export default function Register({ onSubmitOverride }: RegisterProps = {}) {
   const { register, handleSubmit, formState: { errors } } = useForm<RegisterForm>();
   const navigate = useNavigate();
   const { login } = useAuth();
@@ -22,11 +26,29 @@ export default function Register() {
 
   const onSubmit = async (data: RegisterForm) => {
     try {
-      const response = await API.post('/auth/register', data);
-      const token = response.data.token;
+      // Use onSubmitOverride if provided, otherwise use the default implementation
+      if (onSubmitOverride) {
+        const result = await onSubmitOverride(data);
+        const token = result.token || result.data?.token;
+        if (token) {
+          localStorage.setItem('token', token);
+          login(token);
+          navigate(`/dashboard/${data.role}`);
+        }
+        return result;
+      }
       
-      localStorage.setItem('token', token);
-      login(token);
+      // Default implementation using API
+      const response = await API.post('/auth/register', data);
+      const token = response.data?.token || response.token;
+      
+      if (token) {
+        localStorage.setItem('token', token);
+        login(token);
+        navigate(`/dashboard/${data.role}`);
+      } else {
+        throw new Error('No token received from server');
+      }
 
       navigate(`/dashboard/${data.role}`);
     } catch (error: any) {
